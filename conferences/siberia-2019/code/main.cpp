@@ -51,7 +51,10 @@ static void liniar_traversal(benchmark::State& state) {
     void* addr = NULL; // let mmap decide on its own
     auto length = MEM_BUF_SIZE;
     auto protection = PROT_READ | PROT_WRITE;
-    auto flags = MAP_SHARED | MAP_ANONYMOUS | MAP_HUGETLB;
+    auto flags = MAP_SHARED | MAP_ANONYMOUS;
+    if (state.range(3)) { // alloc_2MB_pages
+	flags |= MAP_HUGETLB; // enable 2MB pages 
+    }
     auto fd = -1; // file descriptor must be -1 if MAP_ANONYMOUS is passed
     auto offset = 0; // must be zero if MAP_ANONYMUOS is passed
     auto liniar_array = (std::uint8_t *)mmap(addr, length, protection, flags, fd, offset);
@@ -65,20 +68,23 @@ static void liniar_traversal(benchmark::State& state) {
 
     int sum0 = 0;
     const std::size_t bytes_to_read = state.range(0);
+    const std::size_t step = state.range(1);
     for (auto _: state) {
         for (auto j = 0; j < INTERATIONS; ++j) {
-            for (auto ptr = liniar_array; ptr < liniar_array + bytes_to_read; ptr += (4*LINE_SIZE)) {
+	    std::size_t bytes_read = 0;
+            for (auto ptr = liniar_array; bytes_read < bytes_to_read; ptr += (4*step)) {
                 benchmark::DoNotOptimize(sum0 = *ptr);
-                benchmark::DoNotOptimize(sum0 = *(ptr + LINE_SIZE));
-                benchmark::DoNotOptimize(sum0 = *(ptr + 2*LINE_SIZE));
-                benchmark::DoNotOptimize(sum0 = *(ptr + 3*LINE_SIZE));
+                benchmark::DoNotOptimize(sum0 = *(ptr + step));
+                benchmark::DoNotOptimize(sum0 = *(ptr + 2*step));
+                benchmark::DoNotOptimize(sum0 = *(ptr + 3*step));
+		bytes_read += 4*LINE_SIZE;
             }
         }
     }
 
     state.SetBytesProcessed(int64_t(state.iterations()) *
                             int64_t(bytes_to_read) * INTERATIONS);
-    state.counters["Bytes/clk"] = benchmark::Counter(state.bytes_processed() / (2.8 * 1000 * 1000 * 1000), benchmark::Counter::kIsRate);
+    state.counters["Bytes/clk"] = benchmark::Counter(state.bytes_processed() / (state.range(2) * 1000 * 1000), benchmark::Counter::kIsRate);
 
 #ifdef MMAP_AVAILABLE 
     munmap(liniar_array, length);
@@ -88,20 +94,36 @@ static void liniar_traversal(benchmark::State& state) {
 int main(int argc, char** argv) {
     
     auto nthreads = 1;
+    auto freq = 3900; // Kh
+    auto alloc_2MB_pages = false;
     for (auto i = 0; i < argc; ++i) {
-    auto arg = std::string(argv[i]);
-        if ( arg == "-nthreads") {
-        if (i + 1 < argc) {
-        std::cout << "Number of threads to run: " << arg << '\n';
-        nthreads = std::stoi(std::string(argv[i + 1]));
-        } else {
-        std::cerr << "There should be an integer value after '-nthreads'.\n";
-        return 1;
-        } 
-    }    
+	auto arg = std::string(argv[i]);
+	if (arg == "--nthreads") {
+	    if (i + 1 < argc) {
+		nthreads = std::stoi(std::string(argv[i + 1]));
+	    } else {
+		std::cerr << "There should be an integer value after '-nthreads'.\n";
+		return 1;
+	    } 
+	}    
+	if (arg == "--freq") {
+	    if (i + 1 < argc) {
+		freq  = std::stoi(std::string(argv[i + 1]));
+	    } else {
+		std::cerr << "There should be an integer value after '-freq'.\n";
+		return 1;
+	    } 
+	}    
+	if (arg == "--alloc_2MB_pages") {
+	    alloc_2MB_pages = true;
+	}    
     }
+    std::cout << "The testing is being run with the following params:\n"  
+              << "    Assumbed frequency:       " << freq << " Kh\n"
+              << "    Number of threads to run: " << nthreads << '\n'
+	      << "    Allocate 2MB pages:       " << std::boolalpha << alloc_2MB_pages << '\n';
 
-    std::vector<std::pair<const char*, unsigned long long int>> runs = {
+    std::vector<std::pair<const char*, long int>> runs = {
         {"1 KB",   1_KB},
         {"2 KB",   2_KB},
         {"4 KB",   4_KB},
@@ -154,7 +176,12 @@ int main(int argc, char** argv) {
         {"40 MB",  40_MB},
     };
     for (auto& r : runs)
-      benchmark::RegisterBenchmark("linear traversal", liniar_traversal)->ArgName(r.first)->Arg(r.second)->Threads(nthreads);
-  benchmark::Initialize(&argc, argv);
-  benchmark::RunSpecifiedBenchmarks();
+        benchmark::RegisterBenchmark("linear traversal", liniar_traversal)->ArgName(r.first)->Args({r.second, LINE_SIZE, freq, alloc_2MB_pages})->Threads(nthreads);
+    
+    for (auto step = LINE_SIZE; step < 18 * LINE_SIZE; step += LINE_SIZE) {
+        benchmark::RegisterBenchmark("steps", liniar_traversal)->ArgName(std::to_string(int(step/LINE_SIZE)) + std::string(" lines"))->Args({1_MB, step, freq, alloc_2MB_pages})->Threads(nthreads);
+	
+    }
+    benchmark::Initialize(&argc, argv);
+    benchmark::RunSpecifiedBenchmarks();
 }
